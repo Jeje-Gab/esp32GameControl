@@ -147,10 +147,6 @@
             <span id="direction" class="font-mono text-lg text-on-surface">CENTER</span>
         </div>
 
-        <div class="glass-card rounded-xl p-4 flex flex-col gap-2">
-            <span class="font-mono text-xs text-outline uppercase tracking-widest">Posição X</span>
-            <span id="playerX" class="font-mono text-lg text-on-surface">0</span>
-        </div>
 
         <div class="glass-card rounded-xl p-4 flex flex-col gap-2">
             <span class="font-mono text-xs text-outline uppercase tracking-widest">Pontos</span>
@@ -313,7 +309,6 @@
     function updateGameState(state) {
         if (state.playerX !== undefined) {
             updateCarPosition(state.playerX);
-            playerXText.innerText = state.playerX;
         }
 
         if (state.direction !== undefined) {
@@ -359,8 +354,16 @@
     async function startGame() {
         try {
             const response = await fetch(`${BACKEND_HTTP_URL}/game/start`, {
-                method: "POST"
+                method: "POST",
+                headers: {
+                    "Accept": "application/json"
+                }
             });
+
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(`Erro HTTP ${response.status}: ${text}`);
+            }
 
             const data = await response.json();
 
@@ -375,7 +378,7 @@
             startObstacles();
         } catch (error) {
             console.error("Erro ao iniciar o jogo:", error);
-            alert("Erro ao iniciar o jogo. Verifique se o backend está rodando.");
+            alert(`Erro ao iniciar o jogo: ${error.message}`);
         }
     }
 
