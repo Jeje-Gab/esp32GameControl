@@ -1,6 +1,7 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
+#include <Wire.h>
 
 // Wi-Fi
 const char* ssid = "iPhone";
@@ -9,43 +10,74 @@ const char* password = "////1234";
 // Backend Go
 const char* backendUrl = "http://172.20.10.7:8080/joystick";
 
-// Joystick
-const int pinoVRx = A0;
+// MPU6050
+const int MPU_ADDR = 0x68;
+
+// ESP8266 I2C
+// SDA -> D2
+// SCL -> D1
+const int PINO_SDA = D2;
+const int PINO_SCL = D1;
+
+// Botao do joystick, caso ainda esteja conectado
 const int pinoSW = D5;
 
-int valorX = 0;
 int valorBotao = 0;
 
 String direcaoAtual = "center";
 String ultimaDirecaoEnviada = "";
 
 // Envio para o backend
-// Deixe baixo para o carro ficar mais liso
 unsigned long ultimoEnvio = 0;
 const unsigned long intervaloEnvio = 100;
 
-// Log do joystick
-// Deixe mais alto para conseguir ler o Serial Monitor
-unsigned long ultimoLogJoystick = 0;
-const unsigned long intervaloLogJoystick = 1000;
+// Log do MPU6050
+unsigned long ultimoLogSensor = 0;
+const unsigned long intervaloLogSensor = 1000;
 
 // Log de status da ESP
 unsigned long ultimoLogStatus = 0;
 const unsigned long intervaloLogStatus = 5000;
 
-// Faixas do joystick — ajustadas pela calibracao no setup()
-int centroVRx = 512;
-int limiteEsquerda = 300;
-int limiteDireita = 700;
+// Leituras do MPU6050
+int16_t accX = 0;
+int16_t accY = 0;
+int16_t accZ = 0;
+
+int16_t gyroX = 0;
+int16_t gyroY = 0;
+int16_t gyroZ = 0;
+
+// Calibracao do eixo usado para esquerda/direita
+int centroEixo = 0;
+
+// Sensibilidade da inclinacao
+// Quanto menor, mais sensivel.
+// Valores bons para testar: 2500, 3500, 5000
+const int limiteInclinacao = 3500;
+
+// Escolha do eixo usado para controlar esquerda/direita.
+// Na maioria dos casos, use "X".
+// Se ficar estranho, troque para "Y".
+const String eixoControle = "X";
+
+// Se direita e esquerda ficarem invertidas, troque para true.
+const bool inverterDirecao = false;
 
 // ---------- declaracoes ----------
 void conectarWiFi();
 void verificarWiFi();
-void calibrarJoystick();
-String obterDirecao(int valorX);
+
+bool iniciarMPU6050();
+void calibrarMPU6050();
+bool lerMPU6050();
+
+String obterDirecaoPorMPU();
 String direcaoParaTexto(String direcao);
 String obterStatusWiFi(wl_status_t status);
 bool enviarDirecao(String direcao);
+
+int obterValorEixoControle();
 
 void setup() {
   Serial.begin(115200);
@@ -53,31 +85,51 @@ void setup() {
 
   Serial.println();
   Serial.println("======================================");
-  Serial.println("       ESP8266 Joystick Game");
+  Serial.println("       ESP8266 MPU6050 Game");
   Serial.println("======================================");
 
   pinMode(pinoSW, INPUT_PULLUP);
 
   conectarWiFi();
-  calibrarJoystick();
+
+  Wire.begin(PINO_SDA, PINO_SCL);
+
+  if (!iniciarMPU6050()) {
+    Serial.println("ERRO: MPU6050 nao encontrado.");
+    Serial.println("Verifique os fios:");
+    Serial.println("VCC -> 3V3");
+    Serial.println("GND -> GND");
+    Serial.println("SDA -> D2");
+    Serial.println("SCL -> D1");
+    Serial.println("Reiniciando...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  calibrarMPU6050();
 
   Serial.println();
   Serial.println("Sistema iniciado com sucesso!");
-  Serial.println("Movimente o joystick para testar.");
+  Serial.println("Incline o sensor para esquerda ou direita.");
   Serial.println("--------------------------------------");
 }
 
 void loop() {
   verificarWiFi();
 
-  valorX = analogRead(pinoVRx);
-  valorBotao = digitalRead(pinoSW);
+  bool leituraOk = lerMPU6050();
 
-  direcaoAtual = obterDirecao(valorX);
+  if (leituraOk) {
+    direcaoAtual = obterDirecaoPorMPU();
+  } else {
+    Serial.println("Erro ao ler MPU6050. Enviando CENTER por seguranca.");
+    direcaoAtual = "center";
+  }
+
+  valorBotao = digitalRead(pinoSW);
 
   unsigned long agora = millis();
 
-  // Envia para o backend de forma rápida para deixar o movimento liso
   bool passouIntervaloEnvio = agora - ultimoEnvio >= intervaloEnvio;
 
   if (passouIntervaloEnvio) {
@@ -87,27 +139,36 @@ void loop() {
     ultimoEnvio = agora;
   }
 
-  // Log do joystick mais lento para conseguir ler
-  bool passouIntervaloLogJoystick = agora - ultimoLogJoystick >= intervaloLogJoystick;
+  bool passouIntervaloLogSensor = agora - ultimoLogSensor >= intervaloLogSensor;
 
-  if (passouIntervaloLogJoystick) {
+  if (passouIntervaloLogSensor) {
     Serial.println();
-    Serial.println("========== LEITURA DO JOYSTICK ==========");
+    Serial.println("========== LEITURA DO MPU6050 ==========");
 
-    Serial.print("Valor eixo X: ");
-    Serial.print(valorX);
+    Serial.print("AccX: ");
+    Serial.print(accX);
 
-    Serial.print(" | Centro: ");
-    Serial.print(centroVRx);
+    Serial.print(" | AccY: ");
+    Serial.print(accY);
 
-    Serial.print(" | Limite esquerda: ");
-    Serial.print(limiteEsquerda);
+    Serial.print(" | AccZ: ");
+    Serial.println(accZ);
 
-    Serial.print(" | Limite direita: ");
-    Serial.println(limiteDireita);
+    Serial.print("Eixo de controle: ");
+    Serial.print(eixoControle);
+
+    Serial.print(" | Valor eixo: ");
+    Serial.print(obterValorEixoControle());
+
+    Serial.print(" | Centro calibrado: ");
+    Serial.print(centroEixo);
+
+    Serial.print(" | Limite inclinacao: ");
+    Serial.println(limiteInclinacao);
 
     Serial.print("Direcao detectada: ");
     Serial.print(direcaoParaTexto(direcaoAtual));
+
     Serial.print(" | Valor enviado ao backend: ");
     Serial.println(direcaoAtual);
 
@@ -116,10 +177,9 @@ void loop() {
 
     Serial.println("=========================================");
 
-    ultimoLogJoystick = agora;
+    ultimoLogSensor = agora;
   }
 
-  // Log de status da ESP mais espaçado
   bool passouIntervaloLogStatus = agora - ultimoLogStatus >= intervaloLogStatus;
 
   if (passouIntervaloLogStatus) {
@@ -140,6 +200,7 @@ void loop() {
 
     Serial.print("Ultima direcao lida: ");
     Serial.print(direcaoParaTexto(direcaoAtual));
+
     Serial.print(" | Valor backend: ");
     Serial.println(direcaoAtual);
 
@@ -148,53 +209,137 @@ void loop() {
     ultimoLogStatus = agora;
   }
 
-  // Delay pequeno para nao travar o movimento
   delay(20);
 }
 
-// Le 30 amostras com o joystick em repouso e calcula os limites automaticamente.
-// Mantenha o joystick solto ao ligar a ESP.
-void calibrarJoystick() {
+bool iniciarMPU6050() {
   Serial.println();
-  Serial.println("========== CALIBRACAO DO JOYSTICK ==========");
-  Serial.println("Mantenha o joystick SOLTO na posicao neutra...");
+  Serial.println("========== INICIANDO MPU6050 ==========");
+
+  Wire.beginTransmission(MPU_ADDR);
+  byte erro = Wire.endTransmission();
+
+  if (erro != 0) {
+    Serial.print("MPU6050 nao respondeu. Erro I2C: ");
+    Serial.println(erro);
+    return false;
+  }
+
+  // Acorda o MPU6050
+  // Registrador 0x6B = PWR_MGMT_1
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0);
+  erro = Wire.endTransmission();
+
+  if (erro != 0) {
+    Serial.print("Erro ao acordar MPU6050: ");
+    Serial.println(erro);
+    return false;
+  }
+
+  Serial.println("MPU6050 iniciado com sucesso!");
+  Serial.println("=======================================");
+
+  return true;
+}
+
+bool lerMPU6050() {
+  Wire.beginTransmission(MPU_ADDR);
+
+  // Registrador inicial do acelerometro: 0x3B
+  Wire.write(0x3B);
+
+  byte erro = Wire.endTransmission(false);
+
+  if (erro != 0) {
+    return false;
+  }
+
+  Wire.requestFrom(MPU_ADDR, 14, true);
+
+  if (Wire.available() < 14) {
+    return false;
+  }
+
+  accX = Wire.read() << 8 | Wire.read();
+  accY = Wire.read() << 8 | Wire.read();
+  accZ = Wire.read() << 8 | Wire.read();
+
+  // Temperatura, nao usada
+  Wire.read() << 8 | Wire.read();
+
+  gyroX = Wire.read() << 8 | Wire.read();
+  gyroY = Wire.read() << 8 | Wire.read();
+  gyroZ = Wire.read() << 8 | Wire.read();
+
+  return true;
+}
+
+void calibrarMPU6050() {
+  Serial.println();
+  Serial.println("========== CALIBRACAO DO MPU6050 ==========");
+  Serial.println("Mantenha o sensor parado na posicao neutra...");
   delay(1500);
 
   long soma = 0;
-  const int amostras = 30;
+  const int amostras = 50;
 
   for (int i = 0; i < amostras; i++) {
-    soma += analogRead(pinoVRx);
+    lerMPU6050();
+    soma += obterValorEixoControle();
     delay(30);
   }
 
-  centroVRx = (int)(soma / amostras);
+  centroEixo = soma / amostras;
 
-  int rangeEsquerda = centroVRx;
-  int rangeDireita = 1023 - centroVRx;
-
-  limiteEsquerda = centroVRx - max(1, rangeEsquerda / 3);
-  limiteDireita = centroVRx + max(1, rangeDireita / 3);
-
-  if (limiteEsquerda < 0) {
-    limiteEsquerda = 0;
-  }
-
-  if (limiteDireita > 1023) {
-    limiteDireita = 1023;
-  }
+  Serial.print("Eixo usado para controle: ");
+  Serial.println(eixoControle);
 
   Serial.print("Centro detectado: ");
-  Serial.println(centroVRx);
+  Serial.println(centroEixo);
 
-  Serial.print("Limite para ESQUERDA: ");
-  Serial.println(limiteEsquerda);
-
-  Serial.print("Limite para DIREITA: ");
-  Serial.println(limiteDireita);
+  Serial.print("Limite de inclinacao: ");
+  Serial.println(limiteInclinacao);
 
   Serial.println("Calibracao concluida!");
-  Serial.println("============================================");
+  Serial.println("===========================================");
+}
+
+int obterValorEixoControle() {
+  if (eixoControle == "Y") {
+    return accY;
+  }
+
+  return accX;
+}
+
+String obterDirecaoPorMPU() {
+  int valorEixo = obterValorEixoControle();
+
+  int diferenca = valorEixo - centroEixo;
+
+  String direcao = "center";
+
+  if (diferenca > limiteInclinacao) {
+    direcao = "right";
+  } else if (diferenca < -limiteInclinacao) {
+    direcao = "left";
+  } else {
+    direcao = "center";
+  }
+
+  if (inverterDirecao) {
+    if (direcao == "right") {
+      return "left";
+    }
+
+    if (direcao == "left") {
+      return "right";
+    }
+  }
+
+  return direcao;
 }
 
 void conectarWiFi() {
@@ -245,18 +390,6 @@ void verificarWiFi() {
     delay(500);
     conectarWiFi();
   }
-}
-
-String obterDirecao(int valorX) {
-  if (valorX < limiteEsquerda) {
-    return "left";
-  }
-
-  if (valorX > limiteDireita) {
-    return "right";
-  }
-
-  return "center";
 }
 
 String direcaoParaTexto(String direcao) {
