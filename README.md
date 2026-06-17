@@ -1,6 +1,13 @@
-# ESP32 Game Control — Velocity Command
+# ESP32 Game Control — Velocity Command (IoT + IA)
 
-Jogo de navegação em tempo real controlado por um joystick físico conectado a uma ESP8266. O jogador move um carro na tela desviando de obstáculos, com dificuldade crescente ao longo do tempo.
+Jogo de navegação em tempo real controlado por **inclinação física** (MPU6050)
+conectado a uma ESP32/ESP8266, evoluído para uma arquitetura completa de
+**Internet das Coisas + Inteligência Artificial**: controle por **voz** (Google
+Home + Gemini via Sinric Pro), **telemetria** e **alertas push** (ThingsBoard).
+
+> Evolução do projeto da Avaliação Formativa 2: a lógica de borda foi reescrita,
+> a concorrência foi introduzida, e foram adicionadas as camadas de voz/IA e de
+> monitoramento em nuvem.
 
 ---
 
@@ -9,74 +16,150 @@ Jogo de navegação em tempo real controlado por um joystick físico conectado a
 ```
 esp32GameControl/
 ├── ESP32/
-│   └── esp.cpp          # Firmware da ESP8266 (C++)
+│   ├── ESP32.ino        # Firmware (C++/Arduino) — ESP32 (FreeRTOS) e ESP8266 (cooperativo)
+│   └── config.h         # Credenciais (Wi-Fi, Sinric Pro, ThingsBoard)
 ├── backend/
-│   └── main.go          # Servidor Go (HTTP + WebSocket)
-└── frontend/
-    └── index.html       # Interface do jogo (HTML + JS)
+│   └── main.go          # Servidor Go (HTTP + WebSocket) do jogo
+├── frontend/
+│   └── index.html       # Interface do jogo (HTML + JS)
+├── thingsboard/
+│   ├── dashboard.json         # Dashboard importável
+│   └── rule-chain-alerta.json # Rule chain do alarme de temperatura
+└── docs/
+    ├── 01-sinric-pro-google-home-gemini.md   # Setup voz/IA
+    └── 02-thingsboard-dashboard-alertas.md    # Setup monitoramento/push
 ```
 
 ---
 
-## Arquitetura de Comunicação
+## Arquitetura da Solução (IoT + IA)
 
-O projeto é composto por três camadas que se comunicam de formas distintas, cada uma escolhida de acordo com as capacidades e necessidades de cada componente.
-
-### Fluxograma
+A ESP é o **hub de borda** e fala com múltiplos serviços ao mesmo tempo. Cada
+canal usa o protocolo mais adequado ao seu papel.
 
 ```mermaid
 flowchart TD
-    subgraph ESP["ESP8266 — Joystick"]
-        J[Leitura do joystick\n analogRead + calibração]
-        D[Determina direção\n left / right / center]
-        J --> D
+    subgraph ESP["ESP32 / ESP8266 — Borda (firmware concorrente)"]
+        SENS[Task Sensor\n MPU6050: direcao + temperatura]
+        GAME[Task Jogo\n HTTP POST 100ms]
+        SINRIC[Task Sinric\n WebSocket Sinric Pro]
+        TELE[Task Telemetria\n MQTT ThingsBoard]
     end
 
-    subgraph Backend["Backend Go — Servidor Central"]
-        R[POST /joystick\n recebe direção]
-        S[Atualiza estado do jogo\n playerX, direction]
-        T[Game Ticker\n 1s — score, aceleração]
-        B[Broadcast WebSocket\n envia GameState]
-        R --> S --> B
-        T --> B
+    subgraph Voz["Camada de Voz + IA"]
+        GH[Google Home / Assistente]
+        GEM[Google Gemini\n linguagem natural]
+        SP[Sinric Pro\n Switch + Temp Sensor]
+        GH <--> GEM
+        GH <--> SP
     end
 
-    subgraph Frontend["Frontend — Navegador"]
-        WS[WebSocket\n recebe GameState]
-        UI[Atualiza UI\n posição do carro, HUD]
-        BTN[Botão START\n POST /game/start]
-        WS --> UI
+    subgraph Backend["Backend Go — Jogo"]
+        R[POST /joystick]
+        WS[WebSocket -> Frontend]
+        R --> WS
     end
 
-    D -- "HTTP POST /joystick\n JSON: {direction}\n a cada 100ms" --> R
-    B -- "WebSocket push\n JSON: GameState" --> WS
-    BTN -- "HTTP POST /game/start\n HTTP POST /game/stop" --> Backend
+    subgraph Cloud["ThingsBoard — Monitoramento"]
+        DASH[Dashboards]
+        RULE[Rule Chain -> Alarme]
+        PUSH[Push no app mobile]
+        RULE --> PUSH
+    end
+
+    GAME -- "HTTP /joystick" --> R
+    SINRIC -- "wss (comando de voz)" --> SP
+    TELE -- "MQTT telemetry" --> DASH
+    TELE -- "MQTT telemetry" --> RULE
 ```
 
 ### Detalhamento dos Canais
 
-| Canal | Protocolo | Direção | Intervalo | Motivo |
-|---|---|---|---|---|
-| ESP → Backend | HTTP POST | unidirecional | 100ms | HTTP stateless é simples e robusto para microcontroladores com recursos limitados |
-| Frontend → Backend | HTTP POST | unidirecional | sob demanda | Chamadas pontuais de controle (start/stop) não precisam de conexão persistente |
-| Backend → Frontend | WebSocket | push contínuo | por evento | O browser precisa de atualizações em tempo real sem polling; o servidor empurra o estado sempre que algo muda |
+| Canal | Protocolo | Papel |
+|---|---|---|
+| ESP → Backend Go | HTTP POST (100ms) | Direção do joystick alimenta o jogo |
+| Backend → Frontend | WebSocket | Empurra o estado do jogo em tempo real |
+| Google Home ↔ Gemini | Nuvem Google | IA interpreta a fala em linguagem natural |
+| Google Home ↔ ESP | Sinric Pro (WebSocket) | Liga LED por voz / consulta temperatura |
+| ESP → ThingsBoard | MQTT | Telemetria dos sensores + gatilho de alerta |
 
 ---
 
-## Por que essa arquitetura?
+## Concorrência (requisito-chave)
 
-### ESP usa HTTP POST
-A ESP8266 é um microcontrolador com memória e CPU limitadas. Manter uma conexão WebSocket persistente em C++ seria mais complexo e consumiria mais recursos. O HTTP stateless é simples de implementar, fácil de debugar via Serial Monitor e suficientemente rápido para o caso de uso (100ms de intervalo).
+O firmware executa **quatro responsabilidades simultâneas** sem que uma trave a
+outra (manter a conexão Sinric Pro viva enquanto lê o sensor, alimenta o jogo e
+publica telemetria):
 
-### Frontend usa WebSocket
-O navegador precisa refletir o estado do jogo em tempo real. Fazer polling HTTP a cada 100ms funcionaria, mas desperdiçaria requisições quando não há mudança de estado. O WebSocket permite que o backend **empurre** atualizações apenas quando necessário, reduzindo latência e overhead.
+- **Build ESP32** → **tarefas FreeRTOS reais** (`xTaskCreatePinnedToCore`).
+  Rede pesada (Sinric/MQTT) no core 0; tempo-real (sensor/jogo) no core 1.
+  Estado compartilhado protegido por **mutex**.
+- **Build ESP8266** → **escalonador cooperativo não-bloqueante** no `loop()`
+  (o core Arduino da ESP8266 não expõe FreeRTOS; esse é o padrão da plataforma).
 
-### Backend Go é o hub central
-O backend desacopla completamente o controle físico da visualização:
-- Recebe inputs da ESP via HTTP
-- Mantém o estado autoritativo do jogo (`playerX`, `score`, `acceleration`)
-- Roda um ticker de 1 segundo para atualizar score e aumentar a dificuldade
-- Faz broadcast do `GameState` para todos os clientes WebSocket conectados
+O mesmo `ESP32.ino` compila para as duas placas via `#if defined(ESP32)`.
+
+> **Recomendação:** para a demonstração, use **ESP32** — é onde a concorrência é
+> preemptiva de verdade (atende o enunciado ao pé da letra) e onde Sinric Pro +
+> MQTT + jogo rodam com folga.
+
+---
+
+## Hardware
+
+| Componente | Papel | Justificativa |
+|---|---|---|
+| **MPU6050** (acelerômetro/giroscópio) | Controle por inclinação + **temperatura** | Substitui o joystick mecânico da AF2 por sensor inercial; o registrador de temperatura (antes ignorado) agora alimenta a consulta de voz e o alerta |
+| **LED onboard** (GPIO2) | Atuador controlado por voz | Demonstra "Ok Google, ligar..." sem hardware extra |
+
+---
+
+## Camadas e como configurar
+
+| Camada | O que faz | Guia |
+|---|---|---|
+| Voz + IA | Google Home + Gemini via Sinric Pro | [docs/01](docs/01-sinric-pro-google-home-gemini.md) |
+| Monitoramento | Dashboard + alerta push | [docs/02](docs/02-thingsboard-dashboard-alertas.md) |
+
+Antes de compilar, preencha [`ESP32/config.h`](ESP32/config.h) com Wi-Fi,
+credenciais do Sinric Pro e o Access Token do ThingsBoard.
+
+---
+
+## Como rodar
+
+### Firmware
+
+1. Arduino IDE → instale as libs: **SinricPro**, **ArduinoJson**, **PubSubClient**
+   (o SinricPro puxa **WebSockets** como dependência).
+2. Selecione a placa (**ESP32 Dev Module** ou **NodeMCU 1.0 (ESP-12E)**).
+3. Preencha `ESP32/config.h` e faça upload de `ESP32/ESP32.ino`.
+
+### Backend (jogo)
+
+```bash
+cd backend
+go run main.go
+```
+
+Sobe em `http://localhost:8080`.
+
+### Frontend
+
+Abra `frontend/index.html` no navegador. Ajuste o IP do backend no topo do `<script>`.
+
+---
+
+## Requisitos do trabalho — status
+
+| # | Requisito | Onde |
+|---|---|---|
+| 1 | Migração/reescrita do firmware | `ESP32/ESP32.ino` (C++/Arduino modular) |
+| 2 | Concorrência (FreeRTOS / threads) | Tasks FreeRTOS (ESP32) / cooperativo (ESP8266) |
+| 3 | Novo sensor/atuador justificado | MPU6050 (inclinação+temperatura) + LED atuador |
+| 4 | Google Home via Sinric Pro | `docs/01` — Switch + Temperature Sensor |
+| 5 | ThingsBoard: dashboard + alerta push | `docs/02` + `thingsboard/*.json` |
+| 6 | Camada de IA (Gemini) | `docs/01` — interpretação de voz natural |
 
 ---
 
@@ -84,54 +167,19 @@ O backend desacopla completamente o controle físico da visualização:
 
 | Método | Endpoint | Descrição |
 |---|---|---|
-| `POST` | `/joystick` | Recebe direção da ESP e atualiza posição do jogador |
-| `POST` | `/game/start` | Inicia o jogo e reseta o estado |
+| `POST` | `/joystick` | Recebe direção da ESP |
+| `POST` | `/game/start` | Inicia e reseta o jogo |
 | `POST` | `/game/stop` | Para o jogo |
-| `GET` | `/game/status` | Retorna o estado atual do jogo |
-| `WS` | `/ws` | Conexão WebSocket para o frontend |
+| `GET`  | `/game/status` | Estado atual |
+| `WS`   | `/ws` | WebSocket do frontend |
 
----
-
-## Payload da ESP
-
+### Payload da ESP (jogo)
 ```json
 { "direction": "left" }
 ```
 
-Valores possíveis: `left`, `right`, `center`.
-
-## GameState (broadcast WebSocket)
-
+### Telemetria da ESP (ThingsBoard)
 ```json
-{
-  "playerX": 225,
-  "direction": "center",
-  "score": 12,
-  "running": true,
-  "elapsedSeconds": 12,
-  "elapsedTime": "00:12",
-  "acceleration": 1.2,
-  "playerSpeed": 24
-}
+{ "temperature": 28.4, "direction": "left", "accX": 1200,
+  "accY": -340, "accZ": 16100, "led": true, "rssi": -57 }
 ```
-
----
-
-## Como rodar
-
-### Backend
-
-```bash
-cd backend
-go run main.go
-```
-
-O servidor sobe em `http://localhost:8080`.
-
-### Frontend
-
-Abra `frontend/index.html` diretamente no navegador. Certifique-se de que a URL do backend no arquivo aponta para o IP correto da máquina onde o backend está rodando.
-
-### Firmware ESP8266
-
-Compile e faça upload do `ESP32/esp.cpp` via Arduino IDE ou PlatformIO. Configure o SSID, senha e IP do backend nas constantes no topo do arquivo.

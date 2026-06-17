@@ -1,0 +1,123 @@
+{
+  "title": "Velocity Command",
+  "name": "Velocity Command",
+  "configuration": {
+    "description": "Telemetria em tempo real da ESP (MPU6050, direcao, LED, RSSI).",
+    "widgets": {
+      "w-temperature": {
+        "isSystemType": true,
+        "bundleAlias": "charts",
+        "typeAlias": "basic_timeseries",
+        "type": "timeseries",
+        "title": "Temperatura (MPU6050)",
+        "sizeX": 8,
+        "sizeY": 5,
+        "config": {
+          "datasources": [
+            {
+              "type": "entity",
+              "entityAliasId": "alias-esp",
+              "dataKeys": [
+                { "name": "temperature", "type": "timeseries", "label": "Temperatura (C)", "color": "#f97316", "settings": {} }
+              ]
+            }
+          ],
+          "title": "Temperatura (MPU6050)",
+          "showTitle": true
+        }
+      },
+      "w-accel": {
+        "isSystemType": true,
+        "bundleAlias": "charts",
+        "typeAlias": "basic_timeseries",
+        "type": "timeseries",
+        "title": "Acelerometro (eixos)",
+        "sizeX": 8,
+        "sizeY": 5,
+        "config": {
+          "datasources": [
+            {
+              "type": "entity",
+              "entityAliasId": "alias-esp",
+              "dataKeys": [
+                { "name": "accX", "type": "timeseries", "label": "accX", "color": "#22d3ee", "settings": {} },
+                { "name": "accY", "type": "timeseries", "label": "accY", "color": "#a78bfa", "settings": {} },
+                { "name": "accZ", "type": "timeseries", "label": "accZ", "color": "#34d399", "settings": {} }
+              ]
+            }
+          ],
+          "title": "Acelerometro (eixos)",
+          "showTitle": true
+        }
+      },
+      "w-direction": {
+        "isSystemType": true,
+        "bundleAlias": "cards",
+        "typeAlias": "attributes_card",
+        "type": "latest",
+        "title": "Direcao / LED",
+        "sizeX": 4,
+        "sizeY": 3,
+        "config": {
+          "datasources": [
+            {
+              "type": "entity",
+              "entityAliasId": "alias-esp",
+              "dataKeys": [
+                { "name": "direction", "type": "timeseries", "label": "Direcao", "settings": {} },
+                { "name": "led", "type": "timeseries", "label": "LED", "settings": {} },
+                { "name": "rssi", "type": "timeseries", "label": "RSSI (dBm)", "settings": {} }
+              ]
+            }
+          ],
+          "title": "Direcao / LED / RSSI",
+          "showTitle": true
+        }
+      }
+    },
+    "states": {
+      "default": {
+        "name": "Velocity Command",
+        "root": true,
+        "layouts": {
+          "main": {
+            "widgets": {
+              "w-temperature": { "sizeX": 8, "sizeY": 5, "row": 0, "col": 0 },
+              "w-accel":       { "sizeX": 8, "sizeY": 5, "row": 0, "col": 8 },
+              "w-direction":   { "sizeX": 4, "sizeY": 3, "row": 5, "col": 0 }
+            },
+            "gridSettings": {
+              "backgroundColor": "#0d131f",
+              "columns": 24,
+              "margin": 10,
+              "backgroundSizeMode": "100%"
+            }
+          }
+        }
+      }
+    },
+    "entityAliases": {
+      "alias-esp": {
+        "id": "alias-esp",
+        "alias": "Velocity Command ESP",
+        "filter": {
+          "type": "deviceType",
+          "resolveMultiple": false,
+          "deviceType": "default",
+          "deviceNameFilter": "Velocity Command ESP"
+        }
+      }
+    },
+    "timewindow": {
+      "realtime": { "timewindowMs": 60000 },
+      "aggregation": { "type": "NONE", "limit": 200 }
+    },
+    "settings": {
+      "stateControllerId": "entity",
+      "showTitle": true,
+      "showDashboardsSelect": true,
+      "showEntitiesSelect": true,
+      "toolbarAlwaysOpen": true
+    }
+  }
+}

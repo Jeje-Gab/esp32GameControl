@@ -43,13 +43,32 @@ var (
 	// Velocidade base do carro
 	basePlayerSpeed = 20
 
-	// Velocidade atual do carro
+	// Velocidade atual do carro (usada como "ritmo do jogo" / obstaculos)
 	playerSpeed = 20
+
+	// Movimento continuo do carro.
+	// O ESP32 so INFORMA a direcao atual (~10x/s, com jitter de Wi-Fi).
+	// Quem move o carro e o movementLoop, um loop de tempo FIXO (~30 Hz)
+	// rodando no servidor: assim o movimento e suave e constante, sem
+	// depender de QUANDO cada POST chega. carVelocity = deslocamento por
+	// tick do loop. A 30 Hz, 12/tick => ~360 u/s (pista util e 0..450).
+	carVelocity = 12
+
+	// Momento do ultimo comando do joystick. Se nenhum comando chegar por
+	// mais de inputTimeout (Wi-Fi caiu, ESP travou), o carro volta a
+	// "center" para nao sair desgovernado ate o fim da pista.
+	lastInputAt time.Time
 
 	// Timer do jogo
 	gameTickerStop chan bool
 
 	clients = make(map[*websocket.Conn]bool)
+
+	// gorilla/websocket NAO permite escrita concorrente na mesma conexao.
+	// Como agora varios goroutines transmitem estado (movementLoop ~30 Hz,
+	// gameTicker 1 Hz, handleJoystick por POST), serializamos TODAS as
+	// escritas de WebSocket com este mutex para evitar "concurrent write".
+	wsWriteMutex sync.Mutex
 )
 
 var upgrader = websocket.Upgrader{
@@ -65,14 +84,16 @@ func main() {
 	http.HandleFunc("/game/status", corsMiddleware(handleGameStatus))
 	http.HandleFunc("/ws", handleWebSocket)
 
-	log.Println("Servidor rodando em http://localhost:8080")
-	log.Println("Endpoint joystick: POST http://localhost:8080/joystick")
-	log.Println("Endpoint start:    POST http://localhost:8080/game/start")
-	log.Println("Endpoint stop:     POST http://localhost:8080/game/stop")
-	log.Println("Endpoint status:   GET  http://localhost:8080/game/status")
-	log.Println("WebSocket:         ws://localhost:8080/ws")
+	startMovementLoop()
 
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	log.Println("Servidor rodando em http://localhost:8090")
+	log.Println("Endpoint joystick: POST http://localhost:8090/joystick")
+	log.Println("Endpoint start:    POST http://localhost:8090/game/start")
+	log.Println("Endpoint stop:     POST http://localhost:8090/game/stop")
+	log.Println("Endpoint status:   GET  http://localhost:8090/game/status")
+	log.Println("WebSocket:         ws://localhost:8090/ws")
+
+	if err := http.ListenAndServe(":8090", nil); err != nil {
 		log.Fatal("erro ao iniciar servidor:", err)
 	}
 }
@@ -115,17 +136,12 @@ func handleJoystick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// O POST so atualiza a direcao desejada e marca o instante do comando.
+	// O deslocamento em si acontece no movementLoop (tempo fixo), entao a
+	// velocidade do carro NAO depende do jitter de chegada dos POSTs.
 	switch input.Direction {
-	case "left":
-		playerX -= playerSpeed
-		direction = "left"
-
-	case "right":
-		playerX += playerSpeed
-		direction = "right"
-
-	case "center":
-		direction = "center"
+	case "left", "right", "center":
+		direction = input.Direction
 
 	default:
 		mutex.Unlock()
@@ -133,7 +149,7 @@ func handleJoystick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limitPlayerPositionLocked()
+	lastInputAt = time.Now()
 
 	state := buildGameStateLocked()
 
@@ -244,7 +260,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Frontend conectado via WebSocket")
 
-	if err := conn.WriteJSON(state); err != nil {
+	wsWriteMutex.Lock()
+	err = conn.WriteJSON(state)
+	wsWriteMutex.Unlock()
+
+	if err != nil {
 		log.Println("erro ao enviar estado inicial:", err)
 
 		mutex.Lock()
@@ -268,6 +288,58 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+}
+
+// startMovementLoop roda um loop de tempo FIXO (~30 Hz) que move o carro
+// conforme a ultima direcao informada pelo joystick. Isso desacopla o
+// movimento do carro da chegada (irregular) dos POSTs via Wi-Fi: o carro
+// anda suave e em velocidade constante enquanto a direcao for mantida.
+func startMovementLoop() {
+	const (
+		tick         = 33 * time.Millisecond // ~30 Hz
+		inputTimeout = 400 * time.Millisecond
+	)
+
+	go func() {
+		ticker := time.NewTicker(tick)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			mutex.Lock()
+
+			if !running {
+				mutex.Unlock()
+				continue
+			}
+
+			// Trava de seguranca: sem comando recente, recentra o carro.
+			if !lastInputAt.IsZero() && time.Since(lastInputAt) > inputTimeout {
+				direction = "center"
+			}
+
+			moved := false
+			switch direction {
+			case "left":
+				playerX -= carVelocity
+				moved = true
+			case "right":
+				playerX += carVelocity
+				moved = true
+			}
+
+			if !moved {
+				mutex.Unlock()
+				continue
+			}
+
+			limitPlayerPositionLocked()
+			state := buildGameStateLocked()
+
+			mutex.Unlock()
+
+			broadcastGameState(state)
+		}
+	}()
 }
 
 func startGameTicker() {
@@ -372,7 +444,11 @@ func broadcastGameState(state GameState) {
 	mutex.Unlock()
 
 	for _, client := range clientList {
-		if err := client.WriteJSON(state); err != nil {
+		wsWriteMutex.Lock()
+		err := client.WriteJSON(state)
+		wsWriteMutex.Unlock()
+
+		if err != nil {
 			log.Println("erro ao enviar websocket:", err)
 
 			client.Close()

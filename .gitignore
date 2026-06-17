@@ -1,0 +1,11 @@
+# Credenciais reais do firmware — NUNCA versionar.
+# Use ESP32/config.example.h como modelo e crie seu ESP32/config.h local.
+ESP32/config.h
+
+# Binarios do backend Go
+backend/velocity-backend
+backend/velocity-backend.exe
+*.exe
+
+# Logs / temporarios
+*.log

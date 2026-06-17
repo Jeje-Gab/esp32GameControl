@@ -1,0 +1,63 @@
+{
+  "ruleChain": {
+    "additionalInfo": {
+      "description": "Cria um alarme 'Temperatura Alta' quando a telemetria temperature > 40. O push e disparado pelo Notification Center observando esse alarme."
+    },
+    "name": "Alerta Temperatura",
+    "type": "CORE",
+    "firstRuleNodeId": null,
+    "root": false,
+    "debugMode": false,
+    "configuration": null
+  },
+  "metadata": {
+    "firstNodeIndex": 0,
+    "nodes": [
+      {
+        "additionalInfo": {
+          "description": "Passa adiante apenas se temperature > 40",
+          "layoutX": 350,
+          "layoutY": 150
+        },
+        "type": "org.thingsboard.rule.engine.filter.TbJsFilterNode",
+        "name": "temperature > 40",
+        "debugMode": false,
+        "configuration": {
+          "scriptLang": "JS",
+          "jsScript": "return typeof msg.temperature !== 'undefined' && msg.temperature > 40;"
+        }
+      },
+      {
+        "additionalInfo": {
+          "description": "Cria/atualiza o alarme critico",
+          "layoutX": 650,
+          "layoutY": 150
+        },
+        "type": "org.thingsboard.rule.engine.action.TbCreateAlarmNode",
+        "name": "Temperatura Alta",
+        "debugMode": false,
+        "configuration": {
+          "alarmType": "Temperatura Alta",
+          "severity": "CRITICAL",
+          "propagate": true,
+          "propagateToOwner": false,
+          "propagateToTenant": false,
+          "useMessageAlarmData": false,
+          "overwriteAlarmDetails": false,
+          "dynamicSeverity": false,
+          "relationTypes": [],
+          "scriptLang": "JS",
+          "alarmDetailsBuildJs": "var details = {}; if (metadata.prevAlarmDetails) { details = JSON.parse(metadata.prevAlarmDetails); } details.temperatura = msg.temperature; return details;"
+        }
+      }
+    ],
+    "connections": [
+      {
+        "fromIndex": 0,
+        "toIndex": 1,
+        "type": "True"
+      }
+    ],
+    "ruleChainConnections": null
+  }
+}
